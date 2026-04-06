@@ -5,6 +5,7 @@ A Python multi-agent investment research workflow that turns market/news/SEC inp
 - sector theses from a researcher agent
 - style-specific stock selections from value, growth, macro, and event traders
 - a cross-checking validator review
+- an interactive UI for full-run, industry-input, and single-stock workflows
 
 Outputs are saved as structured JSON plus readable Markdown reports under `app/data/runs/<run_id>/`.
 
@@ -23,11 +24,18 @@ The pipeline simulates a buy-side research process:
    - event / catalyst
 6. Run a validator over all trader portfolios
 
+The project now supports three user-facing modes:
+
+1. `Run whole procedure`
+2. `Industry workflow`
+3. `Single-stock workflow`
+
 ## Current Architecture
 
 Entrypoint:
 
 - `app/main.py`
+- `streamlit_app.py`
 
 Core orchestration:
 
@@ -41,6 +49,11 @@ Main folders:
 - `app/tools`
 - `app/utils`
 - `app/data/runs`
+
+Main runtime helpers:
+
+- `app/runner.py`
+- `app/runtime.py`
 
 ## Data Sources
 
@@ -74,6 +87,19 @@ Current run sequence:
 7. `STEP 6`: macro trader
 8. `STEP 7`: event trader
 9. `STEP 8`: validator
+
+For manual-entry workflows:
+
+- industry mode:
+  - build an industry-focused research input
+  - researcher analyzes the user-selected industry
+  - traders select stocks from that industry research universe
+  - validator cross-checks the outputs
+
+- stock mode:
+  - build a direct evidence pack for the user-selected ticker
+  - four traders analyze that exact stock from different styles
+  - validator compares the style-specific judgments
 
 ## Outputs
 
@@ -122,10 +148,38 @@ Then fill in real values for:
 
 Do not commit `.env`.
 
-### 4. Run the pipeline
+### 4. Run the CLI pipeline
 
 ```bash
 python -m app.main
+```
+
+### 5. Run the UI
+
+```bash
+python -m streamlit run streamlit_app.py
+```
+
+The UI exposes three entry points:
+
+- `Run whole procedure`
+- industry input -> researcher -> four traders -> validator
+- single-stock input -> four traders -> validator
+
+Each agent step is shown in the browser with both markdown and JSON views.
+
+Important:
+
+- Start Streamlit from the project virtual environment
+- Prefer `python -m streamlit ...` instead of a globally installed `streamlit` command
+- Otherwise the UI may start under Anaconda/system Python and fail to import project dependencies such as `openai`
+
+Recommended startup:
+
+```bash
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m streamlit run streamlit_app.py
 ```
 
 ## Environment Variables

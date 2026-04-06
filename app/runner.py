@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from datetime import datetime
 
 from app.agents.research_agent import run_research_from_signals
 from app.agents.research_signal_agent import run_signal_extractor
@@ -8,6 +9,7 @@ from app.agents.trader_growth_agent import run_growth_trader
 from app.agents.trader_macro_agent import run_macro_trader
 from app.agents.trader_event_agent import run_event_trader
 from app.agents.validator_agent import run_validator
+from app.tools.company_data import get_company_profile
 from app.tools.evidence_pack_builder import build_evidence_pack
 from app.tools.universe_builder import build_stock_universe_for_trader_pool
 from app.sources.research_sources import (
@@ -17,6 +19,8 @@ from app.sources.research_sources import (
     get_sec_company_facts,
     get_sec_company_submissions,
 )
+from app.sources.universe_sources import get_theme_seed_tickers
+from app.tools.filings_collector import get_cik_for_ticker
 from app.storage import (
     save_research_step,
     save_value_trader_step,
@@ -123,7 +127,201 @@ def build_research_input() -> tuple[str, dict[str, object]]:
     )
 
 
-async def run_research_and_four_traders(run_id: str, client) -> dict[str, Path]:
+def _build_sec_validation_samples(tickers: list[str], max_pairs: int = 3) -> list[dict[str, object]]:
+    samples: list[dict[str, object]] = []
+    count = 0
+    for ticker in tickers:
+        cik = get_cik_for_ticker(ticker)
+        if not cik:
+            continue
+        samples.append(get_sec_company_submissions(cik))
+        samples.append(get_sec_company_facts(cik))
+        count += 1
+        if count >= max_pairs:
+            break
+    return samples
+
+
+def build_industry_research_input(industry: str) -> tuple[str, dict[str, object]]:
+    industry_name = industry.strip()
+    seed_tickers = get_theme_seed_tickers(industry_name)[:6]
+
+    source_bundle = {
+        "macro_news": get_finnhub_market_news(category="general", limit=6),
+        "company_news_signals": [
+            get_finnhub_company_news(ticker, days_back=21, limit=5)
+            for ticker in seed_tickers
+        ],
+        "thematic_search_results": [
+            get_brave_search_results(f"{industry_name} outlook next 12 months", count=4),
+            get_brave_search_results(f"{industry_name} demand outlook next 12 months", count=4),
+            get_brave_search_results(f"{industry_name} earnings outlook next 12 months", count=4),
+            get_brave_search_results(f"{industry_name} capex outlook next 12 months", count=4),
+            get_brave_search_results(f"{industry_name} valuation outlook next 12 months", count=4),
+        ],
+        "social_signal_results": [
+            get_brave_search_results(f"{industry_name} investing thesis x.com OR twitter", count=4),
+            get_brave_search_results(f"{industry_name} outlook substack OR blog analysis", count=4),
+        ],
+        "sec_validation_samples": _build_sec_validation_samples(seed_tickers),
+        "task": (
+            f"Analyze the user-selected industry '{industry_name}'. "
+            "Identify the most investable subsectors, bottlenecks, beneficiaries, and asymmetric opportunities within this industry over the next 3 to 12 months."
+        ),
+        "user_selected_industry": industry_name,
+        "seed_tickers": seed_tickers,
+    }
+
+    return (
+        json.dumps(source_bundle, ensure_ascii=False, indent=2),
+        summarize_research_source_bundle(source_bundle),
+    )
+
+
+def build_single_stock_context(ticker: str, run_id: str) -> tuple[dict[str, object], dict[str, object]]:
+    normalized_ticker = ticker.upper().strip()
+    profile = get_company_profile(normalized_ticker)
+    company_name = profile.get("company_name") or normalized_ticker
+    sector_name = f"Direct Analysis: {company_name} ({normalized_ticker})"
+    summary = (
+        f"User requested direct single-stock analysis for {company_name} ({normalized_ticker}). "
+        f"Industry context: {profile.get('industry') or profile.get('sector') or 'N/A'}. "
+        "All trader agents should evaluate this exact stock only, using the live evidence pack as the basis."
+    )
+    research_data = {
+        "run_id": run_id,
+        "created_at": datetime.now().isoformat(timespec='seconds'),
+        "agent_name": "manual_stock_input",
+        "model": "manual_input",
+        "signal_input": {
+            "user_selected_stock": normalized_ticker,
+            "company_profile": profile,
+        },
+        "candidate_sectors": [
+            {
+                "name": sector_name,
+                "decision": "accept",
+                "reason": "User requested direct stock analysis.",
+            }
+        ],
+        "final_sectors": [
+            {
+                "name": sector_name,
+                "thesis": profile.get("business_summary", ""),
+                "why_now": profile.get("market_position", ""),
+                "drivers": {
+                    "short_term": [profile.get("valuation_notes", "")] if profile.get("valuation_notes") else [],
+                    "medium_term": [profile.get("revenue_characteristics", "")] if profile.get("revenue_characteristics") else [],
+                    "long_term": [profile.get("profitability_notes", "")] if profile.get("profitability_notes") else [],
+                },
+                "risks": {
+                    "short_term": profile.get("key_risks", []),
+                    "medium_term": [],
+                    "long_term": [],
+                },
+                "alpha_potential": "medium",
+                "positioning": profile.get("market_position", ""),
+                "catalyst": profile.get("valuation_notes", ""),
+                "conviction": 8,
+            }
+        ],
+        "summary": summary,
+    }
+    universe_data = {
+        "themes": [{"name": sector_name}],
+        "theme_ticker_map": {sector_name: [normalized_ticker]},
+        "all_candidate_tickers": [normalized_ticker],
+    }
+    shared_evidence_pack = build_evidence_pack(universe_data, ticker_cache={})
+    return research_data, shared_evidence_pack
+
+
+async def _run_trader_and_validator_steps(
+    run_id: str,
+    research_data: dict[str, object],
+    shared_evidence_pack: dict[str, object],
+    analysis_mode: str = "sector",
+    target_ticker: str | None = None,
+) -> dict[str, object]:
+    if not shared_evidence_pack:
+        trader_universe = build_stock_universe_for_trader_pool(research_data)
+        shared_ticker_cache: dict[str, dict[str, object]] = {}
+        shared_evidence_pack = build_evidence_pack(
+            trader_universe,
+            ticker_cache=shared_ticker_cache,
+        )
+
+    print("STEP 4: Value trader...")
+    value_data = await run_value_trader(
+        research_data,
+        run_id,
+        shared_evidence_pack=shared_evidence_pack,
+        analysis_mode=analysis_mode,
+        target_ticker=target_ticker,
+    )
+    value_dir = save_value_trader_step(run_id, value_data)
+
+    print("STEP 5: Growth trader...")
+    growth_data = await run_growth_trader(
+        research_data,
+        run_id,
+        shared_evidence_pack=shared_evidence_pack,
+        analysis_mode=analysis_mode,
+        target_ticker=target_ticker,
+    )
+    growth_dir = save_growth_trader_step(run_id, growth_data)
+
+    print("STEP 6: Macro trader...")
+    macro_data = await run_macro_trader(
+        research_data,
+        run_id,
+        shared_evidence_pack=shared_evidence_pack,
+        analysis_mode=analysis_mode,
+        target_ticker=target_ticker,
+    )
+    macro_dir = save_macro_trader_step(run_id, macro_data)
+
+    print("STEP 7: Event trader...")
+    event_data = await run_event_trader(
+        research_data,
+        run_id,
+        shared_evidence_pack=shared_evidence_pack,
+        analysis_mode=analysis_mode,
+        target_ticker=target_ticker,
+    )
+    event_dir = save_event_trader_step(run_id, event_data)
+
+    print("STEP 8: Validator...")
+    validator_data = await run_validator(
+        research_data,
+        value_data,
+        growth_data,
+        macro_data,
+        event_data,
+        run_id,
+    )
+    validator_dir = save_validator_step(run_id, validator_data)
+
+    return {
+        "outputs": {
+            "research": research_data,
+            "value": value_data,
+            "growth": growth_data,
+            "macro": macro_data,
+            "event": event_data,
+            "validator": validator_data,
+        },
+        "dirs": {
+            "value_dir": value_dir,
+            "growth_dir": growth_dir,
+            "macro_dir": macro_dir,
+            "event_dir": event_dir,
+            "validator_dir": validator_dir,
+        },
+    }
+
+
+async def run_full_workflow(run_id: str, client) -> dict[str, object]:
     print("STEP 1: Collect raw data...")
     research_input, research_source_availability = build_research_input()
 
@@ -143,54 +341,84 @@ async def run_research_and_four_traders(run_id: str, client) -> dict[str, Path]:
         ticker_cache=shared_ticker_cache,
     )
 
-    print("STEP 4: Value trader...")
-    value_data = await run_value_trader(
-        research_data,
+    downstream = await _run_trader_and_validator_steps(
         run_id,
-        shared_evidence_pack=shared_evidence_pack,
-    )
-    value_dir = save_value_trader_step(run_id, value_data)
-
-    print("STEP 5: Growth trader...")
-    growth_data = await run_growth_trader(
         research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
+        shared_evidence_pack,
     )
-    growth_dir = save_growth_trader_step(run_id, growth_data)
-
-    print("STEP 6: Macro trader...")
-    macro_data = await run_macro_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-    )
-    macro_dir = save_macro_trader_step(run_id, macro_data)
-
-    print("STEP 7: Event trader...")
-    event_data = await run_event_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-    )
-    event_dir = save_event_trader_step(run_id, event_data)
-
-    print("STEP 8: Validator...")
-    validator_data = await run_validator(
-        research_data,
-        value_data,
-        growth_data,
-        macro_data,
-        event_data,
-        run_id,
-    )
-    validator_dir = save_validator_step(run_id, validator_data)
 
     return {
-        "research_dir": research_dir,
-        "value_dir": value_dir,
-        "growth_dir": growth_dir,
-        "macro_dir": macro_dir,
-        "event_dir": event_dir,
-        "validator_dir": validator_dir,
+        "run_id": run_id,
+        "mode": "whole_procedure",
+        "outputs": downstream["outputs"],
+        "dirs": {
+            "research_dir": research_dir,
+            **downstream["dirs"],
+        },
     }
+
+
+async def run_industry_workflow(run_id: str, client, industry: str) -> dict[str, object]:
+    print("STEP 1: Collect industry raw data...")
+    research_input, research_source_availability = build_industry_research_input(industry)
+
+    print("STEP 2: Extract industry signals...")
+    signal_data = await run_signal_extractor(research_input, run_id, client)
+    signal_data["data_availability"] = research_source_availability
+
+    print("STEP 3: Generate industry sector ideas...")
+    research_data = await run_research_from_signals(signal_data, run_id, client)
+    research_data["user_selected_industry"] = industry.strip()
+    research_dir = save_research_step(run_id, research_data)
+
+    print("STEP 3.5: Build shared evidence pack...")
+    trader_universe = build_stock_universe_for_trader_pool(research_data)
+    shared_ticker_cache: dict[str, dict[str, object]] = {}
+    shared_evidence_pack = build_evidence_pack(
+        trader_universe,
+        ticker_cache=shared_ticker_cache,
+    )
+
+    downstream = await _run_trader_and_validator_steps(
+        run_id,
+        research_data,
+        shared_evidence_pack,
+    )
+
+    return {
+        "run_id": run_id,
+        "mode": "industry",
+        "input_label": industry.strip(),
+        "outputs": downstream["outputs"],
+        "dirs": {
+            "research_dir": research_dir,
+            **downstream["dirs"],
+        },
+    }
+
+
+async def run_stock_workflow(run_id: str, client, ticker: str) -> dict[str, object]:
+    normalized_ticker = ticker.upper().strip()
+    print("STEP 1: Build direct stock context...")
+    research_data, shared_evidence_pack = build_single_stock_context(normalized_ticker, run_id)
+
+    downstream = await _run_trader_and_validator_steps(
+        run_id,
+        research_data,
+        shared_evidence_pack,
+        analysis_mode="single_stock",
+        target_ticker=normalized_ticker,
+    )
+
+    return {
+        "run_id": run_id,
+        "mode": "stock",
+        "input_label": normalized_ticker,
+        "outputs": downstream["outputs"],
+        "dirs": downstream["dirs"],
+    }
+
+
+async def run_research_and_four_traders(run_id: str, client) -> dict[str, Path]:
+    result = await run_full_workflow(run_id=run_id, client=client)
+    return result["dirs"]

@@ -124,6 +124,8 @@ def build_macro_trader_input(
     research_data: dict[str, Any],
     chosen_sectors: list[dict[str, Any]],
     shared_evidence_pack: dict[str, Any] | None = None,
+    analysis_mode: str = "sector",
+    target_ticker: str | None = None,
 ) -> tuple[str, dict[str, Any], dict[str, dict[str, Any]]]:
     if shared_evidence_pack is None:
         universe_data = build_stock_universe_from_sectors(chosen_sectors)
@@ -141,7 +143,21 @@ def build_macro_trader_input(
         "final_sectors": research_data.get("final_sectors", []),
         "chosen_sectors": chosen_sectors,
         "evidence_pack": compacted_evidence,
-        "task": (
+        "analysis_mode": analysis_mode,
+        "task": "",
+    }
+
+    if analysis_mode == "single_stock":
+        payload["target_ticker"] = (target_ticker or "").upper().strip()
+        payload["task"] = (
+            f"Analyze exactly one user-selected stock: {(target_ticker or '').upper().strip()}. "
+            "Return exactly one selected stock entry for that ticker only, and rate it BUY, WATCH, or SELL from a macro / regime perspective. "
+            "Do not substitute another ticker. "
+            "Treat this as an investment underwriting task, not an information gathering task. "
+            "Use the latest filings, filing analysis, IR/transcript links, structured fundamentals, market snapshot, and recent catalysts from the evidence pack as your primary basis."
+        )
+    else:
+        payload["task"] = (
             "Based on the approved sectors/themes and the provided compact evidence pack, "
             "identify 2 to 6 potentially investable U.S. stocks from a macro / regime perspective, with fewer only if evidence is weak and never more than 9 total. "
             "You must stay within the approved sectors only. "
@@ -149,8 +165,7 @@ def build_macro_trader_input(
             "Use the latest filings, filing analysis, IR/transcript links, structured fundamentals, market snapshot, and recent catalysts from the evidence pack as your primary basis. "
             "Prefer the cleanest regime expressions, especially power, infrastructure, industrial, cooling, and equipment names, over obvious mega-cap winners when style fit is stronger. "
             "At least one selected stock should be a direct macro transmission vehicle in power, grid, industrial, cooling, or semiconductor equipment."
-        ),
-    }
+        )
 
     payload_str = json.dumps(payload, ensure_ascii=False, indent=2)
     company_lookup = build_company_lookup(compacted_evidence)
@@ -160,6 +175,8 @@ async def run_macro_trader(
     research_data: dict[str, Any],
     run_id: str,
     shared_evidence_pack: dict[str, Any] | None = None,
+    analysis_mode: str = "sector",
+    target_ticker: str | None = None,
 ) -> dict[str, Any]:
     agent = build_macro_trader_agent()
     sector_review = await review_macro_sectors(research_data)
@@ -167,6 +184,8 @@ async def run_macro_trader(
         research_data,
         sector_review["chosen_sectors"],
         shared_evidence_pack=shared_evidence_pack,
+        analysis_mode=analysis_mode,
+        target_ticker=target_ticker,
     )
     context = MacroTraderContext()
 
@@ -208,6 +227,8 @@ async def run_macro_trader(
         "summary": parsed.get("summary", ""),
         "tool_calls": context.tool_calls,
         "data_availability": data_availability,
+        "analysis_mode": analysis_mode,
+        "target_ticker": (target_ticker or "").upper().strip(),
     }
 
     return data

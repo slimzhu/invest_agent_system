@@ -2,41 +2,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
-import os
 
-from openai import AsyncOpenAI
-from agents import set_default_openai_api, set_default_openai_client
-
-from app.config import settings
-from app.runner import run_research_and_four_traders
+from app.runner import run_full_workflow
+from app.runtime import configure_client, ensure_api_key
 from app.storage import create_run_id
 
 
-def configure_client() -> AsyncOpenAI:
-    client = AsyncOpenAI(
-        api_key=settings.OPENROUTER_API_KEY,
-        base_url=settings.OPENROUTER_BASE_URL,
-        timeout=240.0,
-        max_retries=5,
-    )
-
-    set_default_openai_client(client)
-    set_default_openai_api("chat_completions")
-
-    if settings.DISABLE_TRACING:
-        os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
-
-    return client
-
-
 async def main() -> None:
-    if not settings.OPENROUTER_API_KEY:
-        raise ValueError("OPENROUTER_API_KEY 未设置，请先填写 .env 文件。")
-
+    ensure_api_key()
     client = configure_client()
 
     run_id = create_run_id()
-    result_dirs = await run_research_and_four_traders(run_id=run_id, client=client)
+    workflow_result = await run_full_workflow(run_id=run_id, client=client)
+    result_dirs = workflow_result["dirs"]
 
     print("\n===== Workflow Completed =====")
     print(f"Run ID: {run_id}")

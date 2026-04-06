@@ -42,6 +42,28 @@ Current runtime order:
 8. `STEP 7`: event trader
 9. `STEP 8`: validator
 
+## Entry Modes
+
+The project now supports three user-facing entry modes:
+
+1. `Run whole procedure`
+   - full default pipeline
+   - raw data -> signal extractor -> researcher -> four traders -> validator
+
+2. `Industry workflow`
+   - user manually enters an industry or theme
+   - system builds an industry-focused research input
+   - researcher analyzes the industry
+   - four traders pick stocks from that research universe
+   - validator reviews the combined output
+
+3. `Stock workflow`
+   - user manually enters a ticker
+   - system builds a direct single-stock evidence context
+   - four traders analyze that exact stock only from different styles
+   - validator compares the four style-specific judgments
+    - this mode does not depend on the default researcher-first discovery path
+
 ## Agent Roles
 
 ### `research_signal_agent.py`
@@ -179,14 +201,36 @@ Each step usually contains:
 ## Important Files
 
 - `app/main.py`
+- `app/runtime.py`
 - `app/runner.py`
 - `app/config.py`
 - `app/storage.py`
+- `streamlit_app.py`
 - `app/agents/*.py`
 - `app/prompts/*.py`
 - `app/sources/*.py`
 - `app/tools/*.py`
 - `app/utils/*.py`
+
+## UI
+
+The project now has a lightweight Streamlit UI:
+
+- file: `streamlit_app.py`
+- recommended command: `python -m streamlit run streamlit_app.py`
+
+The UI shows:
+
+- the existing `Run whole procedure` button
+- an industry input workflow
+- a single-stock input workflow
+- every agent output in markdown + JSON form
+
+Important runtime note:
+
+- launch Streamlit from the project `.venv`
+- do not rely on a global Anaconda/system `streamlit` binary
+- otherwise imports like `openai` may fail even if the project virtualenv is configured correctly
 
 ## Configuration
 
