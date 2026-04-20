@@ -45,17 +45,21 @@ def _extract_between(
 def extract_mda_section(clean_text: str, form: str) -> str:
     form = form.upper().strip()
 
-    if form == "10-K":
+    if form in {"10-K", "20-F", "40-F"}:
         return _extract_between(
             clean_text,
             start_patterns=[
                 "management’s discussion and analysis of financial condition and results of operations",
                 "management's discussion and analysis of financial condition and results of operations",
+                "operating and financial review and prospects",
+                "management discussion and analysis",
             ],
             end_patterns=[
                 "quantitative and qualitative disclosures about market risk",
                 "financial statements and supplementary data",
                 "controls and procedures",
+                "directors, senior management and employees",
+                "major shareholders and related party transactions",
             ],
             max_len=10000,
         )
@@ -75,24 +79,46 @@ def extract_mda_section(clean_text: str, form: str) -> str:
             max_len=8000,
         )
 
+    if form == "6-K":
+        return _extract_between(
+            clean_text,
+            start_patterns=[
+                "results of operations",
+                "financial results",
+                "earnings release",
+                "press release",
+                "management discussion and analysis",
+            ],
+            end_patterns=[
+                "forward-looking statements",
+                "signature",
+                "signatures",
+                "exhibit",
+            ],
+            max_len=7000,
+        )
+
     return ""
 
 
 def extract_segment_or_business_section(clean_text: str, form: str) -> str:
     form = form.upper().strip()
 
-    if form == "10-K":
+    if form in {"10-K", "20-F", "40-F"}:
         return _extract_between(
             clean_text,
             start_patterns=[
                 "business",
                 "our business",
                 "segments",
+                "information on the company",
+                "operating and financial review and prospects",
             ],
             end_patterns=[
                 "risk factors",
                 "properties",
                 "legal proceedings",
+                "directors, senior management and employees",
             ],
             max_len=8000,
         )
@@ -109,6 +135,25 @@ def extract_segment_or_business_section(clean_text: str, form: str) -> str:
                 "controls and procedures",
             ],
             max_len=6000,
+        )
+
+    if form == "6-K":
+        return _extract_between(
+            clean_text,
+            start_patterns=[
+                "business overview",
+                "company overview",
+                "results summary",
+                "operational highlights",
+                "earnings release",
+            ],
+            end_patterns=[
+                "forward-looking statements",
+                "signature",
+                "signatures",
+                "exhibit",
+            ],
+            max_len=5000,
         )
 
     return ""

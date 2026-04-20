@@ -1,9 +1,11 @@
 from pathlib import Path
 import json
 from datetime import datetime
+from typing import Any, Callable
 
 from app.agents.research_agent import run_research_from_signals
 from app.agents.research_signal_agent import run_signal_extractor
+from app.agents.candidate_discovery_agent import run_candidate_discovery
 from app.agents.trader_value_agent import run_value_trader
 from app.agents.trader_growth_agent import run_growth_trader
 from app.agents.trader_macro_agent import run_macro_trader
@@ -29,6 +31,50 @@ from app.storage import (
     save_event_trader_step,
     save_validator_step,
 )
+
+
+StepCallback = Callable[[str, dict[str, Any]], None]
+
+
+def _notify_step(
+    step_callback: StepCallback | None,
+    step_key: str,
+    data: dict[str, Any] | None = None,
+    dir_path: Path | str | None = None,
+    status: str = "completed",
+    error: str | None = None,
+) -> None:
+    if step_callback is None:
+        return
+    payload: dict[str, Any] = {
+        "status": status,
+        "data": data or {},
+    }
+    if dir_path is not None:
+        payload["dir"] = str(dir_path)
+    if error:
+        payload["error"] = error
+    step_callback(step_key, payload)
+
+
+def _error_payload(step: str, exc: Exception) -> dict[str, str]:
+    return {
+        "step": step,
+        "message": f"{type(exc).__name__}: {exc}",
+    }
+
+
+def parse_ticker_list(raw_value: str) -> list[str]:
+    tickers: list[str] = []
+    seen = set()
+    normalized = raw_value.replace("\n", ",").replace(" ", ",")
+    for item in normalized.split(","):
+        ticker = item.upper().strip()
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        tickers.append(ticker)
+    return tickers
 
 
 def summarize_research_source_bundle(source_bundle: dict[str, object]) -> dict[str, object]:
@@ -116,7 +162,7 @@ def build_research_input() -> tuple[str, dict[str, object]]:
             get_sec_company_submissions("1551182"),
         ],
         "task": (
-            "Broadly scan U.S. equity sectors/themes and identify 8 to 12 candidates first, "
+            "Broadly scan global listed sector/theme opportunities, including global leaders and U.S.-listed ADRs, and identify 8 to 12 candidates first, "
             "then narrow them to the best 3 non-consensus, alpha-oriented opportunities over the next 3 to 12 months."
         ),
     }
@@ -166,7 +212,8 @@ def build_industry_research_input(industry: str) -> tuple[str, dict[str, object]
         "sec_validation_samples": _build_sec_validation_samples(seed_tickers),
         "task": (
             f"Analyze the user-selected industry '{industry_name}'. "
-            "Identify the most investable subsectors, bottlenecks, beneficiaries, and asymmetric opportunities within this industry over the next 3 to 12 months."
+            "Identify the most investable subsectors, bottlenecks, beneficiaries, and asymmetric opportunities within this industry over the next 3 to 12 months. "
+            "You are allowed to surface global industry leaders and U.S.-listed ADRs, not only U.S. domestic issuers."
         ),
         "user_selected_industry": industry_name,
         "seed_tickers": seed_tickers,
@@ -176,6 +223,50 @@ def build_industry_research_input(industry: str) -> tuple[str, dict[str, object]
         json.dumps(source_bundle, ensure_ascii=False, indent=2),
         summarize_research_source_bundle(source_bundle),
     )
+
+
+def _merge_tickers(base: list[str], extra: list[str], max_items: int = 14) -> list[str]:
+    merged: list[str] = []
+    seen = set()
+    for ticker in base + extra:
+        if not isinstance(ticker, str):
+            continue
+        value = ticker.upper().strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        merged.append(value)
+        if len(merged) >= max_items:
+            break
+    return merged
+
+
+def enrich_research_data_with_discovery(
+    research_data: dict[str, object],
+    discovery_data: dict[str, object],
+) -> dict[str, object]:
+    discovered_map = {
+        item.get("theme", ""): item.get("validated_tickers", [])
+        for item in discovery_data.get("theme_candidates", [])
+        if isinstance(item, dict) and item.get("theme")
+    }
+
+    enriched = dict(research_data)
+    for key in ("candidate_sectors", "final_sectors"):
+        updated_sectors: list[dict[str, object]] = []
+        for sector in enriched.get(key, []):
+            if not isinstance(sector, dict):
+                continue
+            theme_name = str(sector.get("name", "")).strip()
+            seed_tickers = get_theme_seed_tickers(theme_name)
+            discovered_tickers = discovered_map.get(theme_name, [])
+            updated_sector = dict(sector)
+            updated_sector["tickers"] = _merge_tickers(seed_tickers, discovered_tickers)
+            updated_sectors.append(updated_sector)
+        enriched[key] = updated_sectors
+
+    enriched["candidate_discovery"] = discovery_data
+    return enriched
 
 
 def build_single_stock_context(ticker: str, run_id: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -233,6 +324,12 @@ def build_single_stock_context(ticker: str, run_id: str) -> tuple[dict[str, obje
         "all_candidate_tickers": [normalized_ticker],
     }
     shared_evidence_pack = build_evidence_pack(universe_data, ticker_cache={})
+    if not shared_evidence_pack.get("evidence_by_theme", {}).get(sector_name):
+        shared_evidence_pack = build_evidence_pack(
+            universe_data,
+            ticker_cache={},
+            strict_readiness=False,
+        )
     return research_data, shared_evidence_pack
 
 
@@ -242,7 +339,13 @@ async def _run_trader_and_validator_steps(
     shared_evidence_pack: dict[str, object],
     analysis_mode: str = "sector",
     target_ticker: str | None = None,
+    step_callback: StepCallback | None = None,
 ) -> dict[str, object]:
+    outputs: dict[str, object] = {
+        "research": research_data,
+    }
+    dirs: dict[str, object] = {}
+
     if not shared_evidence_pack:
         trader_universe = build_stock_universe_for_trader_pool(research_data)
         shared_ticker_cache: dict[str, dict[str, object]] = {}
@@ -251,100 +354,151 @@ async def _run_trader_and_validator_steps(
             ticker_cache=shared_ticker_cache,
         )
 
-    print("STEP 4: Value trader...")
-    value_data = await run_value_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-        analysis_mode=analysis_mode,
-        target_ticker=target_ticker,
-    )
-    value_dir = save_value_trader_step(run_id, value_data)
+    try:
+        print("STEP 4: Value trader...")
+        value_data = await run_value_trader(
+            research_data,
+            run_id,
+            shared_evidence_pack=shared_evidence_pack,
+            analysis_mode=analysis_mode,
+            target_ticker=target_ticker,
+        )
+        value_dir = save_value_trader_step(run_id, value_data)
+        outputs["value"] = value_data
+        dirs["value_dir"] = value_dir
+        _notify_step(step_callback, "value", value_data, value_dir)
+    except Exception as exc:
+        error = _error_payload("value", exc)
+        _notify_step(step_callback, "value", status="failed", error=error["message"])
+        return {"outputs": outputs, "dirs": dirs, "status": "failed", "error": error}
 
-    print("STEP 5: Growth trader...")
-    growth_data = await run_growth_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-        analysis_mode=analysis_mode,
-        target_ticker=target_ticker,
-    )
-    growth_dir = save_growth_trader_step(run_id, growth_data)
+    try:
+        print("STEP 5: Growth trader...")
+        growth_data = await run_growth_trader(
+            research_data,
+            run_id,
+            shared_evidence_pack=shared_evidence_pack,
+            analysis_mode=analysis_mode,
+            target_ticker=target_ticker,
+        )
+        growth_dir = save_growth_trader_step(run_id, growth_data)
+        outputs["growth"] = growth_data
+        dirs["growth_dir"] = growth_dir
+        _notify_step(step_callback, "growth", growth_data, growth_dir)
+    except Exception as exc:
+        error = _error_payload("growth", exc)
+        _notify_step(step_callback, "growth", status="failed", error=error["message"])
+        return {"outputs": outputs, "dirs": dirs, "status": "failed", "error": error}
 
-    print("STEP 6: Macro trader...")
-    macro_data = await run_macro_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-        analysis_mode=analysis_mode,
-        target_ticker=target_ticker,
-    )
-    macro_dir = save_macro_trader_step(run_id, macro_data)
+    try:
+        print("STEP 6: Macro trader...")
+        macro_data = await run_macro_trader(
+            research_data,
+            run_id,
+            shared_evidence_pack=shared_evidence_pack,
+            analysis_mode=analysis_mode,
+            target_ticker=target_ticker,
+        )
+        macro_dir = save_macro_trader_step(run_id, macro_data)
+        outputs["macro"] = macro_data
+        dirs["macro_dir"] = macro_dir
+        _notify_step(step_callback, "macro", macro_data, macro_dir)
+    except Exception as exc:
+        error = _error_payload("macro", exc)
+        _notify_step(step_callback, "macro", status="failed", error=error["message"])
+        return {"outputs": outputs, "dirs": dirs, "status": "failed", "error": error}
 
-    print("STEP 7: Event trader...")
-    event_data = await run_event_trader(
-        research_data,
-        run_id,
-        shared_evidence_pack=shared_evidence_pack,
-        analysis_mode=analysis_mode,
-        target_ticker=target_ticker,
-    )
-    event_dir = save_event_trader_step(run_id, event_data)
+    try:
+        print("STEP 7: Event trader...")
+        event_data = await run_event_trader(
+            research_data,
+            run_id,
+            shared_evidence_pack=shared_evidence_pack,
+            analysis_mode=analysis_mode,
+            target_ticker=target_ticker,
+        )
+        event_dir = save_event_trader_step(run_id, event_data)
+        outputs["event"] = event_data
+        dirs["event_dir"] = event_dir
+        _notify_step(step_callback, "event", event_data, event_dir)
+    except Exception as exc:
+        error = _error_payload("event", exc)
+        _notify_step(step_callback, "event", status="failed", error=error["message"])
+        return {"outputs": outputs, "dirs": dirs, "status": "failed", "error": error}
 
-    print("STEP 8: Validator...")
-    validator_data = await run_validator(
-        research_data,
-        value_data,
-        growth_data,
-        macro_data,
-        event_data,
-        run_id,
-    )
-    validator_dir = save_validator_step(run_id, validator_data)
+    try:
+        print("STEP 8: Validator...")
+        validator_data = await run_validator(
+            research_data,
+            value_data,
+            growth_data,
+            macro_data,
+            event_data,
+            run_id,
+        )
+        validator_dir = save_validator_step(run_id, validator_data)
+        outputs["validator"] = validator_data
+        dirs["validator_dir"] = validator_dir
+        _notify_step(step_callback, "validator", validator_data, validator_dir)
+    except Exception as exc:
+        error = _error_payload("validator", exc)
+        _notify_step(step_callback, "validator", status="failed", error=error["message"])
+        return {"outputs": outputs, "dirs": dirs, "status": "failed", "error": error}
 
     return {
-        "outputs": {
-            "research": research_data,
-            "value": value_data,
-            "growth": growth_data,
-            "macro": macro_data,
-            "event": event_data,
-            "validator": validator_data,
-        },
-        "dirs": {
-            "value_dir": value_dir,
-            "growth_dir": growth_dir,
-            "macro_dir": macro_dir,
-            "event_dir": event_dir,
-            "validator_dir": validator_dir,
-        },
+        "outputs": outputs,
+        "dirs": dirs,
+        "status": "completed",
+        "error": None,
     }
 
 
-async def run_full_workflow(run_id: str, client) -> dict[str, object]:
+async def run_full_workflow(run_id: str, client, step_callback: StepCallback | None = None) -> dict[str, object]:
+    outputs: dict[str, object] = {}
+    dirs: dict[str, object] = {}
     print("STEP 1: Collect raw data...")
     research_input, research_source_availability = build_research_input()
 
-    print("STEP 2: Extract signals...")
-    signal_data = await run_signal_extractor(research_input, run_id, client)
-    signal_data["data_availability"] = research_source_availability
+    try:
+        print("STEP 2: Extract signals...")
+        signal_data = await run_signal_extractor(research_input, run_id, client)
+        signal_data["data_availability"] = research_source_availability
 
-    print("STEP 3: Generate sector ideas...")
-    research_data = await run_research_from_signals(signal_data, run_id, client)
-    research_dir = save_research_step(run_id, research_data)
+        print("STEP 3: Generate sector ideas...")
+        research_data = await run_research_from_signals(signal_data, run_id, client)
 
-    print("STEP 3.5: Build shared evidence pack...")
-    trader_universe = build_stock_universe_for_trader_pool(research_data)
-    shared_ticker_cache: dict[str, dict[str, object]] = {}
-    shared_evidence_pack = build_evidence_pack(
-        trader_universe,
-        ticker_cache=shared_ticker_cache,
-    )
+        print("STEP 3.25: Discover candidate stocks...")
+        discovery_data = await run_candidate_discovery(research_data, run_id, client)
+        research_data = enrich_research_data_with_discovery(research_data, discovery_data)
+        research_dir = save_research_step(run_id, research_data)
+        outputs["research"] = research_data
+        dirs["research_dir"] = research_dir
+        _notify_step(step_callback, "research", research_data, research_dir)
+
+        print("STEP 3.5: Build shared evidence pack...")
+        trader_universe = build_stock_universe_for_trader_pool(research_data)
+        shared_ticker_cache: dict[str, dict[str, object]] = {}
+        shared_evidence_pack = build_evidence_pack(
+            trader_universe,
+            ticker_cache=shared_ticker_cache,
+        )
+    except Exception as exc:
+        error = _error_payload("research", exc)
+        _notify_step(step_callback, "research", data=outputs.get("research", {}), status="failed", error=error["message"])
+        return {
+            "run_id": run_id,
+            "mode": "whole_procedure",
+            "outputs": outputs,
+            "dirs": dirs,
+            "status": "failed",
+            "error": error,
+        }
 
     downstream = await _run_trader_and_validator_steps(
         run_id,
         research_data,
         shared_evidence_pack,
+        step_callback=step_callback,
     )
 
     return {
@@ -352,37 +506,61 @@ async def run_full_workflow(run_id: str, client) -> dict[str, object]:
         "mode": "whole_procedure",
         "outputs": downstream["outputs"],
         "dirs": {
-            "research_dir": research_dir,
+            **dirs,
             **downstream["dirs"],
         },
+        "status": downstream.get("status", "completed"),
+        "error": downstream.get("error"),
     }
 
 
-async def run_industry_workflow(run_id: str, client, industry: str) -> dict[str, object]:
+async def run_industry_workflow(run_id: str, client, industry: str, step_callback: StepCallback | None = None) -> dict[str, object]:
+    outputs: dict[str, object] = {}
+    dirs: dict[str, object] = {}
     print("STEP 1: Collect industry raw data...")
     research_input, research_source_availability = build_industry_research_input(industry)
 
-    print("STEP 2: Extract industry signals...")
-    signal_data = await run_signal_extractor(research_input, run_id, client)
-    signal_data["data_availability"] = research_source_availability
+    try:
+        print("STEP 2: Extract industry signals...")
+        signal_data = await run_signal_extractor(research_input, run_id, client)
+        signal_data["data_availability"] = research_source_availability
 
-    print("STEP 3: Generate industry sector ideas...")
-    research_data = await run_research_from_signals(signal_data, run_id, client)
-    research_data["user_selected_industry"] = industry.strip()
-    research_dir = save_research_step(run_id, research_data)
+        print("STEP 3: Generate industry sector ideas...")
+        research_data = await run_research_from_signals(signal_data, run_id, client)
+        print("STEP 3.25: Discover candidate stocks...")
+        discovery_data = await run_candidate_discovery(research_data, run_id, client)
+        research_data = enrich_research_data_with_discovery(research_data, discovery_data)
+        research_data["user_selected_industry"] = industry.strip()
+        research_dir = save_research_step(run_id, research_data)
+        outputs["research"] = research_data
+        dirs["research_dir"] = research_dir
+        _notify_step(step_callback, "research", research_data, research_dir)
 
-    print("STEP 3.5: Build shared evidence pack...")
-    trader_universe = build_stock_universe_for_trader_pool(research_data)
-    shared_ticker_cache: dict[str, dict[str, object]] = {}
-    shared_evidence_pack = build_evidence_pack(
-        trader_universe,
-        ticker_cache=shared_ticker_cache,
-    )
+        print("STEP 3.5: Build shared evidence pack...")
+        trader_universe = build_stock_universe_for_trader_pool(research_data)
+        shared_ticker_cache: dict[str, dict[str, object]] = {}
+        shared_evidence_pack = build_evidence_pack(
+            trader_universe,
+            ticker_cache=shared_ticker_cache,
+        )
+    except Exception as exc:
+        error = _error_payload("research", exc)
+        _notify_step(step_callback, "research", data=outputs.get("research", {}), status="failed", error=error["message"])
+        return {
+            "run_id": run_id,
+            "mode": "industry",
+            "input_label": industry.strip(),
+            "outputs": outputs,
+            "dirs": dirs,
+            "status": "failed",
+            "error": error,
+        }
 
     downstream = await _run_trader_and_validator_steps(
         run_id,
         research_data,
         shared_evidence_pack,
+        step_callback=step_callback,
     )
 
     return {
@@ -391,16 +569,81 @@ async def run_industry_workflow(run_id: str, client, industry: str) -> dict[str,
         "input_label": industry.strip(),
         "outputs": downstream["outputs"],
         "dirs": {
-            "research_dir": research_dir,
+            **dirs,
             **downstream["dirs"],
         },
+        "status": downstream.get("status", "completed"),
+        "error": downstream.get("error"),
     }
 
 
-async def run_stock_workflow(run_id: str, client, ticker: str) -> dict[str, object]:
-    normalized_ticker = ticker.upper().strip()
+async def run_stock_workflow(run_id: str, client, ticker: str, step_callback: StepCallback | None = None) -> dict[str, object]:
+    tickers = parse_ticker_list(ticker)
+    if not tickers:
+        return {
+            "run_id": run_id,
+            "mode": "stock",
+            "input_label": "",
+            "outputs": {},
+            "dirs": {},
+            "status": "failed",
+            "error": {"step": "research", "message": "No valid ticker input provided."},
+        }
+
+    if len(tickers) > 1:
+        batch_outputs: dict[str, Any] = {}
+        batch_dirs: dict[str, Any] = {}
+        batch_status = "completed"
+        batch_error: dict[str, str] | None = None
+
+        for single_ticker in tickers:
+            sub_run_id = f"{run_id}__{single_ticker}"
+            sub_result = await run_stock_workflow(sub_run_id, client, single_ticker)
+            batch_outputs[single_ticker] = sub_result
+            batch_dirs[single_ticker] = sub_result.get("dirs", {})
+            if step_callback is not None:
+                step_callback(
+                    f"batch:{single_ticker}",
+                    {
+                        "status": sub_result.get("status", "completed"),
+                        "data": sub_result,
+                    },
+                )
+            if sub_result.get("status") != "completed" and batch_status == "completed":
+                batch_status = "failed"
+                batch_error = sub_result.get("error")
+
+        return {
+            "run_id": run_id,
+            "mode": "stock_batch",
+            "input_label": ", ".join(tickers),
+            "outputs": {
+                "batch": batch_outputs,
+            },
+            "dirs": {
+                "batch": batch_dirs,
+            },
+            "status": batch_status,
+            "error": batch_error,
+        }
+
+    normalized_ticker = tickers[0]
     print("STEP 1: Build direct stock context...")
-    research_data, shared_evidence_pack = build_single_stock_context(normalized_ticker, run_id)
+    try:
+        research_data, shared_evidence_pack = build_single_stock_context(normalized_ticker, run_id)
+        _notify_step(step_callback, "research", research_data)
+    except Exception as exc:
+        error = _error_payload("research", exc)
+        _notify_step(step_callback, "research", status="failed", error=error["message"])
+        return {
+            "run_id": run_id,
+            "mode": "stock",
+            "input_label": normalized_ticker,
+            "outputs": {},
+            "dirs": {},
+            "status": "failed",
+            "error": error,
+        }
 
     downstream = await _run_trader_and_validator_steps(
         run_id,
@@ -408,6 +651,7 @@ async def run_stock_workflow(run_id: str, client, ticker: str) -> dict[str, obje
         shared_evidence_pack,
         analysis_mode="single_stock",
         target_ticker=normalized_ticker,
+        step_callback=step_callback,
     )
 
     return {
@@ -416,6 +660,8 @@ async def run_stock_workflow(run_id: str, client, ticker: str) -> dict[str, obje
         "input_label": normalized_ticker,
         "outputs": downstream["outputs"],
         "dirs": downstream["dirs"],
+        "status": downstream.get("status", "completed"),
+        "error": downstream.get("error"),
     }
 
 

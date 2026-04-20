@@ -14,6 +14,7 @@ from app.utils.agent_runner import run_agent_with_retry
 from app.utils.trader_output import (
     build_company_lookup,
     extract_json_dict,
+    finalize_stock_lists,
     normalize_selected_stock,
     normalize_watch_stock,
 )
@@ -33,7 +34,7 @@ def company_profile_tool(
     ticker: str,
 ) -> str:
     """
-    Get a live company snapshot for a U.S. stock ticker using configured data sources.
+    Get a live company snapshot for a global leader or U.S.-listed stock/ADR using configured data sources.
     """
     profile = get_company_profile(ticker)
 
@@ -159,10 +160,11 @@ def build_event_trader_input(
     else:
         payload["task"] = (
             "Based on the approved sectors/themes and the provided compact evidence pack, "
-            "identify 2 to 6 potentially investable U.S. stocks from an event / catalyst perspective, with fewer only if evidence is weak and never more than 9 total. "
+            "identify 2 to 6 potentially investable global leaders or U.S.-listed stocks/ADRs from an event / catalyst perspective, with fewer only if evidence is weak and never more than 9 total. "
             "You must stay within the approved sectors only. "
             "Treat this as an investment underwriting task, not an information gathering task. "
             "Use the latest filings, filing analysis, IR/transcript links, structured fundamentals, market snapshot, and recent catalysts from the evidence pack as your primary basis. "
+            "Global leaders and U.S.-listed ADRs are allowed when they have the clearest catalyst path and evidence quality. "
             "Actively consider smaller or less-covered names if the next catalyst can move the stock more than it would move an already recognized mega-cap leader."
         )
 
@@ -191,6 +193,22 @@ async def run_event_trader(
     result = await run_agent_with_retry(agent, user_input, context=context)
     raw_output = result.final_output
     parsed = extract_json_from_text(raw_output)
+    selected_stocks, watch_stocks = finalize_stock_lists(
+        [
+            normalize_selected_stock(
+                stock,
+                company_lookup=company_lookup,
+                default_rating=parsed.get("decision", ""),
+            )
+            for stock in parsed.get("selected_stocks", [])
+            if isinstance(stock, dict)
+        ],
+        [
+            normalize_watch_stock(stock, company_lookup=company_lookup)
+            for stock in parsed.get("watch_stocks", [])
+            if isinstance(stock, dict)
+        ],
+    )
 
     data = {
         "run_id": run_id,
@@ -209,20 +227,8 @@ async def run_event_trader(
             sector.get("name", "") for sector in sector_review.get("chosen_sectors", [])
         ],
         "sector_review_reason": sector_review.get("sector_review_reason", ""),
-        "selected_stocks": [
-            normalize_selected_stock(
-                stock,
-                company_lookup=company_lookup,
-                default_rating=parsed.get("decision", ""),
-            )
-            for stock in parsed.get("selected_stocks", [])
-            if isinstance(stock, dict)
-        ],
-        "watch_stocks": [
-            normalize_watch_stock(stock, company_lookup=company_lookup)
-            for stock in parsed.get("watch_stocks", [])
-            if isinstance(stock, dict)
-        ],
+        "selected_stocks": selected_stocks,
+        "watch_stocks": watch_stocks,
         "summary": parsed.get("summary", ""),
         "tool_calls": context.tool_calls,
         "data_availability": data_availability,

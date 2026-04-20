@@ -6,6 +6,15 @@ THEME_TO_TICKERS: dict[str, list[str]] = {
     "ai infrastructure": ["NVDA", "AVGO", "ANET", "AMD", "VRT", "ETN"],
     "memory cycle": ["MU", "WDC", "AMAT", "LRCX", "KLAC"],
     "memory supercycle": ["MU", "WDC", "AMAT", "LRCX", "KLAC"],
+    "semiconductor": ["NVDA", "AVGO", "AMD", "MU", "TSM", "ASML", "ARM", "AMAT", "LRCX", "KLAC", "GFS", "UMC"],
+    "semiconductors": ["NVDA", "AVGO", "AMD", "MU", "TSM", "ASML", "ARM", "AMAT", "LRCX", "KLAC", "GFS", "UMC"],
+    "semiconductor manufacturing": ["TSM", "GFS", "UMC", "ASML", "AMAT", "LRCX", "KLAC"],
+    "semiconductor foundry": ["TSM", "GFS", "UMC", "ASML", "AMAT", "LRCX", "KLAC"],
+    "foundry": ["TSM", "GFS", "UMC", "ASML", "AMAT", "LRCX", "KLAC"],
+    "logic semiconductors": ["NVDA", "AMD", "AVGO", "ARM", "TSM", "ASML"],
+    "semiconductor equipment": ["ASML", "AMAT", "LRCX", "KLAC"],
+    "wafer fabrication equipment": ["ASML", "AMAT", "LRCX", "KLAC"],
+    "advanced packaging": ["TSM", "AMKR", "ASML", "AMAT", "LRCX"],
     "power grid": ["ETN", "HUBB", "PWR", "VRT", "NVT", "GEV"],
     "data center power": ["ETN", "VRT", "PWR", "HUBB", "NVT", "GEV"],
     "power grid and data center power equipment": ["ETN", "VRT", "PWR", "HUBB", "NVT", "GEV"],
@@ -47,6 +56,12 @@ def get_theme_seed_tickers(theme_name: str) -> list[str]:
         "optical": ["ANET", "CIEN", "LITE", "COHR", "AVGO"],
         "network": ["ANET", "CIEN", "AVGO"],
         "ai": ["NVDA", "AVGO", "ANET", "AMD", "VRT", "ETN"],
+        "semiconductor": ["NVDA", "AVGO", "AMD", "MU", "TSM", "ASML", "ARM", "AMAT", "LRCX", "KLAC", "GFS", "UMC"],
+        "chip": ["NVDA", "AVGO", "AMD", "MU", "TSM", "ASML", "ARM", "AMAT", "LRCX", "KLAC", "GFS", "UMC"],
+        "foundry": ["TSM", "GFS", "UMC", "ASML", "AMAT", "LRCX", "KLAC"],
+        "logic": ["NVDA", "AMD", "AVGO", "ARM", "TSM", "ASML"],
+        "fabrication": ["TSM", "GFS", "UMC", "ASML", "AMAT", "LRCX", "KLAC"],
+        "equipment": ["ASML", "AMAT", "LRCX", "KLAC", "ETN", "VRT", "PWR"],
         "power": ["ETN", "VRT", "PWR", "HUBB", "NVT", "GEV"],
         "cooling": ["VRT", "ETN", "PWR"],
         "grid": ["ETN", "HUBB", "PWR", "NVT", "GEV"],
@@ -69,6 +84,20 @@ def build_theme_ticker_map(final_sectors: list[dict[str, Any]]) -> dict[str, lis
         name = sector.get("name", "").strip()
         if not name:
             continue
-        theme_map[name] = get_theme_seed_tickers(name)
+        custom_tickers = sector.get("tickers", [])
+        if isinstance(custom_tickers, list) and custom_tickers:
+            seen = set()
+            merged: list[str] = []
+            for ticker in custom_tickers:
+                if not isinstance(ticker, str):
+                    continue
+                value = ticker.upper().strip()
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                merged.append(value)
+            theme_map[name] = merged
+        else:
+            theme_map[name] = get_theme_seed_tickers(name)
 
     return theme_map

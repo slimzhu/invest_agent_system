@@ -123,6 +123,38 @@ def _valuation_view(value: Any) -> str:
     return _as_text(value)
 
 
+def _normalize_plan_dict(value: Any, fallback_keys: tuple[str, ...] = ()) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {str(k): v for k, v in value.items() if v not in (None, "", [], {})}
+
+    normalized: dict[str, Any] = {}
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            normalized["summary"] = text
+    elif value not in (None, "", [], {}):
+        normalized["summary"] = value
+
+    for key in fallback_keys:
+        if key and normalized.get(key) in (None, "", [], {}):
+            continue
+
+    return normalized
+
+
+def _numeric_or_text(value: Any) -> float | int | str | None:
+    if value in (None, ""):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        text = _as_text(value)
+        return text or None
+    if number.is_integer():
+        return int(number)
+    return round(number, 4)
+
+
 def _split_upside_bear(value: Any) -> tuple[str, str]:
     if isinstance(value, dict):
         return _as_text(value.get("upside")), _as_text(value.get("bear"))
@@ -152,6 +184,8 @@ def build_company_lookup(
             lookup[ticker] = {
                 "company_name": profile.get("company_name", ""),
                 "sector_theme": "",
+                "current_price": company.get("market_snapshot", {}).get("current_price")
+                or company.get("fundamentals_summary", {}).get("current_price"),
             }
 
     for theme_name, companies in compacted_evidence.get("evidence_by_theme", {}).items():
@@ -198,6 +232,9 @@ def normalize_selected_stock(
         "sector_theme": _coalesce(stock.get("sector_theme"), meta.get("sector_theme"), ""),
         "rating": _coalesce(stock.get("rating"), stock.get("final_rating"), default_rating),
         "confidence": _confidence_value(stock.get("confidence"), stock.get("final_rating_confidence")),
+        "conviction_score": _numeric_or_text(stock.get("conviction_score")),
+        "time_horizon": _as_text(stock.get("time_horizon")),
+        "current_price": _coalesce(stock.get("current_price"), meta.get("current_price")),
         "style_fit": _coalesce(
             _as_text(stock.get("business_quality")),
             _as_text(stock.get("business_quality_growth_exposure")),
@@ -235,6 +272,21 @@ def normalize_selected_stock(
             _as_text(stock.get("scenario_sensitivity")),
             _as_text(stock.get("sensitivity_analysis")),
             "",
+        ),
+        "entry_strategy": _normalize_plan_dict(
+            _coalesce(stock.get("entry_strategy"), stock.get("entry_plan")),
+        ),
+        "position_sizing": _normalize_plan_dict(
+            _coalesce(stock.get("position_sizing"), stock.get("position_size_plan"), stock.get("position_size")),
+        ),
+        "target_plan": _normalize_plan_dict(
+            _coalesce(stock.get("target_plan"), stock.get("price_target_plan"), stock.get("target_price")),
+        ),
+        "risk_plan": _normalize_plan_dict(
+            _coalesce(stock.get("risk_plan"), stock.get("stop_loss_plan"), stock.get("risk_management")),
+        ),
+        "watch_conditions": _normalize_plan_dict(
+            _coalesce(stock.get("watch_conditions"), stock.get("watch_plan"), stock.get("buy_pass_triggers")),
         ),
         "evidence_used": _as_list(stock.get("evidence_used")) or [
             "recent_filings",
@@ -285,3 +337,45 @@ def normalize_watch_stock(
         ],
         "raw_model_fields": stock,
     }
+
+
+def finalize_stock_lists(
+    selected_stocks: list[dict[str, Any]],
+    watch_stocks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cleaned_selected: list[dict[str, Any]] = []
+    selected_seen: set[str] = set()
+
+    for stock in selected_stocks:
+        if not isinstance(stock, dict):
+            continue
+        ticker = str(stock.get("ticker", "")).upper().strip()
+        if not ticker or ticker == "N/A" or ticker in selected_seen:
+            continue
+        selected_seen.add(ticker)
+        cleaned_selected.append(stock)
+
+    cleaned_watch: list[dict[str, Any]] = []
+    watch_seen: set[str] = set()
+
+    for stock in watch_stocks:
+        if not isinstance(stock, dict):
+            continue
+        ticker = str(stock.get("ticker", "")).upper().strip()
+        company_name = str(stock.get("company_name", "")).strip()
+        reason = str(stock.get("reason_for_monitoring", "")).strip()
+
+        has_placeholder_identity = ticker in ("", "N/A") and company_name in ("", "N/A")
+        if has_placeholder_identity:
+            continue
+        if ticker in selected_seen:
+            continue
+        dedupe_key = ticker or company_name.upper()
+        if not dedupe_key or dedupe_key in watch_seen:
+            continue
+        if not reason:
+            continue
+        watch_seen.add(dedupe_key)
+        cleaned_watch.append(stock)
+
+    return cleaned_selected, cleaned_watch

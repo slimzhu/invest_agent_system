@@ -149,6 +149,8 @@ def compact_company_evidence(company_evidence: dict[str, Any]) -> dict[str, Any]
 
     return {
         "ticker": ticker,
+        "analysis_ready": company_evidence.get("analysis_ready", False),
+        "analysis_readiness_reasons": company_evidence.get("analysis_readiness_reasons", []),
         "company_profile": compact_profile,
         "market_snapshot": compact_market,
         "recent_news": compact_news,

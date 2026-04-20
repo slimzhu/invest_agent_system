@@ -186,6 +186,29 @@ def _append_data_availability(lines: list[str], data_availability: dict[str, Any
                         lines.append(f"- `{key}` sample error: {err}")
         lines.append("")
 
+
+def _append_plan_dict(lines: list[str], title: str, value: Any) -> None:
+    lines.append(f"**{title}**")
+    if isinstance(value, dict) and value:
+        for key, item in value.items():
+            label = key.replace("_", " ").strip().title()
+            if isinstance(item, list):
+                if item:
+                    lines.append(f"- {label}:")
+                    for sub_item in item:
+                        lines.append(f"  - {sub_item}")
+                else:
+                    lines.append(f"- {label}: N/A")
+            elif item not in (None, "", {}, []):
+                lines.append(f"- {label}: {item}")
+        if not any(item not in (None, "", {}, []) for item in value.values()):
+            lines.append("- N/A")
+    elif isinstance(value, str) and value.strip():
+        lines.append(value.strip())
+    else:
+        lines.append("- N/A")
+    lines.append("")
+
 def generate_research_markdown(data: dict[str, Any]) -> str:
     run_id = data.get("run_id", "")
     created_at = data.get("created_at", "")
@@ -195,6 +218,7 @@ def generate_research_markdown(data: dict[str, Any]) -> str:
     final_sectors = data.get("final_sectors", [])
     summary = data.get("summary", "")
     data_availability = signal_input.get("data_availability", {})
+    discovery_output = data.get("candidate_discovery", {})
 
     lines: list[str] = []
     lines.append("# 📊 Market Research Report")
@@ -221,6 +245,26 @@ def generate_research_markdown(data: dict[str, Any]) -> str:
     _append_data_availability(lines, data_availability)
     lines.append("---")
     lines.append("")
+
+    if isinstance(discovery_output, dict) and discovery_output.get("theme_candidates"):
+        lines.append("## 🧩 Candidate Discovery")
+        lines.append("")
+        for item in discovery_output.get("theme_candidates", []):
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"### {item.get('theme', 'Unknown Theme')}")
+            lines.append("")
+            seed = item.get("seed_tickers", [])
+            validated = item.get("validated_tickers", [])
+            lines.append(f"**Seed Tickers:** {', '.join(seed) if seed else 'N/A'}")
+            lines.append("")
+            lines.append(f"**Validated Additions:** {', '.join(validated) if validated else 'None'}")
+            lines.append("")
+            lines.append("**Rationale**")
+            lines.append(item.get("rationale", ""))
+            lines.append("")
+        lines.append("---")
+        lines.append("")
 
     lines.append("## 🧭 Candidate Sectors")
     lines.append("")
@@ -387,8 +431,11 @@ def generate_trader_markdown(
             lines.append("")
             lines.append(f"**Sector Theme:** {stock.get('sector_theme', 'N/A')}")
             lines.append(f"**Rating:** {stock.get('rating', 'N/A')}")
+            lines.append(f"**Current Price:** {stock.get('current_price', 'N/A')}")
             lines.append(f"**Valuation View:** {stock.get('valuation_view', 'N/A')}")
             lines.append(f"**Confidence:** {stock.get('confidence', 'N/A')}")
+            lines.append(f"**Conviction Score:** {stock.get('conviction_score', 'N/A')}")
+            lines.append(f"**Time Horizon:** {stock.get('time_horizon', 'N/A')}")
             lines.append("")
             if fit_label:
                 lines.append("**Style Fit**")
@@ -413,6 +460,11 @@ def generate_trader_markdown(
             evidence_used = stock.get("evidence_used", [])
             _append_list_or_text(lines, evidence_used)
             lines.append("")
+            _append_plan_dict(lines, "Entry Strategy", stock.get("entry_strategy", {}))
+            _append_plan_dict(lines, "Suggested Position Size", stock.get("position_sizing", {}))
+            _append_plan_dict(lines, "Target Plan", stock.get("target_plan", {}))
+            _append_plan_dict(lines, "Risk Plan", stock.get("risk_plan", {}))
+            _append_plan_dict(lines, "Buy / Pass Triggers", stock.get("watch_conditions", {}))
             lines.append("**Upside Case**")
             lines.append(stock.get("upside_case", ""))
             lines.append("")

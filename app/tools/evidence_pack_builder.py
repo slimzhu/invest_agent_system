@@ -93,6 +93,51 @@ def _build_data_availability_summary(
     }
 
 
+def _has_sec_key_facts(structured_fundamentals: dict[str, Any]) -> bool:
+    summary = structured_fundamentals.get("sec_facts_summary", {})
+    key_facts = summary.get("key_facts", {}) if isinstance(summary, dict) else {}
+    return bool(key_facts)
+
+
+def _company_is_analysis_ready(company_evidence: dict[str, Any]) -> tuple[bool, list[str]]:
+    reasons: list[str] = []
+
+    profile = company_evidence.get("company_profile", {})
+    market = company_evidence.get("market_snapshot", {})
+    news = company_evidence.get("company_news", {})
+    filings = company_evidence.get("recent_filings", {})
+    filing_analysis = company_evidence.get("filing_analysis", {})
+    fundamentals = company_evidence.get("structured_fundamentals", {})
+    ir_links = company_evidence.get("ir_and_transcript_links", {})
+
+    profile_ok = bool(isinstance(profile, dict) and profile.get("enabled"))
+    market_ok = bool(isinstance(market, dict) and market.get("enabled"))
+    news_ok = bool(isinstance(news, dict) and news.get("enabled"))
+    filings_ok = bool(isinstance(filings, dict) and filings.get("enabled"))
+    filing_analysis_ok = bool(isinstance(filing_analysis, dict) and filing_analysis.get("enabled"))
+    ir_ok = bool(isinstance(ir_links, dict) and ir_links.get("enabled"))
+
+    fundamentals_ok = False
+    if isinstance(fundamentals, dict):
+        basic = fundamentals.get("basic_financials", {})
+        quote = fundamentals.get("quote", {})
+        fundamentals_ok = bool(
+            (isinstance(basic, dict) and basic.get("enabled"))
+            or (isinstance(quote, dict) and quote.get("enabled"))
+            or _has_sec_key_facts(fundamentals)
+        )
+
+    if not profile_ok:
+        reasons.append("live company profile unavailable")
+    if not (fundamentals_ok or market_ok):
+        reasons.append("fundamentals and market snapshot both too weak")
+    if not (filings_ok or filing_analysis_ok or news_ok or ir_ok):
+        reasons.append("insufficient supporting filings/news/IR context")
+
+    ready = profile_ok and (fundamentals_ok or market_ok) and (filings_ok or filing_analysis_ok or news_ok or ir_ok)
+    return ready, reasons
+
+
 def build_company_evidence(
     ticker: str,
     ticker_cache: dict[str, dict[str, Any]] | None = None,
@@ -182,6 +227,10 @@ def build_company_evidence(
         "ir_and_transcript_links": ir_and_transcript_links,
     }
 
+    analysis_ready, analysis_readiness_reasons = _company_is_analysis_ready(company_evidence)
+    company_evidence["analysis_ready"] = analysis_ready
+    company_evidence["analysis_readiness_reasons"] = analysis_readiness_reasons
+
     if ticker_cache is not None:
         ticker_cache[cache_key] = copy.deepcopy(company_evidence)
 
@@ -191,23 +240,37 @@ def build_company_evidence(
 def build_evidence_pack(
     universe_data: dict[str, Any],
     ticker_cache: dict[str, dict[str, Any]] | None = None,
+    strict_readiness: bool = True,
 ) -> dict[str, Any]:
     theme_ticker_map = universe_data.get("theme_ticker_map", {})
     evidence_by_theme: dict[str, list[dict[str, Any]]] = {}
+    excluded_by_theme: dict[str, list[dict[str, Any]]] = {}
 
     for theme_name, tickers in theme_ticker_map.items():
         company_evidence_list: list[dict[str, Any]] = []
+        excluded_companies: list[dict[str, Any]] = []
 
         for ticker in tickers:
-            company_evidence_list.append(build_company_evidence(ticker, ticker_cache=ticker_cache))
+            company_evidence = build_company_evidence(ticker, ticker_cache=ticker_cache)
+            if company_evidence.get("analysis_ready") or not strict_readiness:
+                company_evidence_list.append(company_evidence)
+            else:
+                excluded_companies.append(
+                    {
+                        "ticker": ticker,
+                        "reasons": company_evidence.get("analysis_readiness_reasons", []),
+                    }
+                )
 
         evidence_by_theme[theme_name] = company_evidence_list
+        excluded_by_theme[theme_name] = excluded_companies
 
     return {
         "themes": universe_data.get("themes", []),
         "theme_ticker_map": theme_ticker_map,
         "evidence_by_theme": evidence_by_theme,
         "data_availability": _build_data_availability_summary(evidence_by_theme),
+        "excluded_by_theme": excluded_by_theme,
     }
 
 

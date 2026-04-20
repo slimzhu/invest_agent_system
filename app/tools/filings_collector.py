@@ -36,6 +36,12 @@ TICKER_TO_CIK = {
     "CIEN": "936395",
     "LITE": "1633978",
     "COHR": "21510",
+    "TSM": "1046179",
+    "ASML": "937966",
+    "ARM": "1973239",
+    "GFS": "1709048",
+    "UMC": "1033767",
+    "AMKR": "1047127",
 }
 
 
@@ -64,7 +70,7 @@ def collect_recent_primary_filings(ticker: str) -> dict[str, Any]:
 
     recent_filings = extract_recent_filings(
         submissions,
-        forms_filter=["10-K", "10-Q", "8-K", "DEF 14A"],
+        forms_filter=["10-K", "10-Q", "8-K", "DEF 14A", "20-F", "6-K", "40-F"],
         max_items=10,
     )
 
@@ -83,7 +89,7 @@ def collect_filing_analysis(ticker: str) -> dict[str, Any]:
 
     primary_filing = None
     for item in filings:
-        if item.get("form") in {"10-K", "10-Q", "8-K"} and item.get("filing_url"):
+        if item.get("form") in {"10-K", "10-Q", "8-K", "20-F", "6-K", "40-F"} and item.get("filing_url"):
             primary_filing = item
             break
 
